@@ -42,9 +42,9 @@ class Stroke(Shape):
         p.setPen(self._pen(self.color, self.width))
         p.setBrush(Qt.BrushStyle.NoBrush)
         path = QPainterPath()
-        path.moveTo(self.points[0])
+        path.moveTo(self.points[0].toPointF())
         for pt in self.points[1:]:
-            path.lineTo(pt)
+            path.lineTo(pt.toPointF())
         p.drawPath(path)
 
     def is_valid(self) -> bool:
