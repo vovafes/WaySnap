@@ -11,6 +11,16 @@ from .canvas import AnnotationCanvas
 SCREENSHOT_PATH = "/tmp/waysnap_shot.png"
 CAPTURE_DELAY_MS = 300  # ms to wait after hiding menu so it disappears from screen
 
+# Pixels sampled for black-screen detection (row_fraction, col_fraction)
+_SAMPLE_GRID = [
+    (0.25, 0.25), (0.25, 0.50), (0.25, 0.75),
+    (0.50, 0.25), (0.50, 0.50), (0.50, 0.75),
+    (0.75, 0.25), (0.75, 0.50), (0.75, 0.75),
+]
+# Wayland security blocks grabWindow by returning a fully-black image;
+# any pixel above this threshold means the grab actually worked.
+_BLACK_THRESHOLD = 5
+
 
 class TrayIconManager(QSystemTrayIcon):
     def __init__(self, app: QApplication) -> None:
@@ -74,48 +84,119 @@ class TrayIconManager(QSystemTrayIcon):
             menu.hide()
         QTimer.singleShot(CAPTURE_DELAY_MS, self._capture_screen)
 
-    def _detect_backend(self) -> str:
-        """Return 'wayland' or 'x11' by inspecting environment variables."""
-        if os.environ.get("XDG_SESSION_TYPE", "").lower() == "wayland":
-            return "wayland"
-        if os.environ.get("WAYLAND_DISPLAY"):
-            return "wayland"
-        return "x11"
-
-    def _find_capture_tool(self, backend: str) -> str | None:
-        """Return full path to grim (Wayland) or maim (X11), or None if missing."""
-        tool = "grim" if backend == "wayland" else "maim"
-        return shutil.which(tool)
-
     def _capture_screen(self) -> None:
-        backend = self._detect_backend()
-        tool_path = self._find_capture_tool(backend)
+        """Try capture methods in priority order; open canvas on first success."""
+        methods = [
+            self._capture_via_qt,         # X11 + some Wayland compositors
+            self._capture_via_dbus_gnome,  # GNOME Wayland (Ubuntu, Fedora, etc.)
+            self._capture_via_grim,        # wlroots Wayland (Sway, Hyprland, etc.)
+            self._capture_via_maim,        # X11 fallback
+        ]
+        for method in methods:
+            if method():
+                self._open_canvas()
+                return
 
-        if tool_path is None:
-            tool_name = "grim" if backend == "wayland" else "maim"
-            self._notify_error(
-                f"Утилита '{tool_name}' не найдена.\n"
-                f"Установите: sudo apt install {tool_name}"
-            )
-            return
+        self._notify_error(
+            "Не удалось сделать скриншот ни одним из доступных методов.\n\n"
+            "Wayland (GNOME/KDE): должен работать без установки утилит.\n"
+            "Wayland (Sway/Hyprland): установите grim → sudo apt install grim\n"
+            "X11: установите maim → sudo apt install maim"
+        )
 
-        cmd = [tool_path, SCREENSHOT_PATH]
+    # ------------------------------------------------------------------
+    # Capture method 1: Qt native grabWindow
+    # Works on X11 and some Wayland compositors.
+    # On security-restricted Wayland it returns a black image — detected below.
+    # ------------------------------------------------------------------
 
+    def _capture_via_qt(self) -> bool:
+        screen = QApplication.primaryScreen()
+        if screen is None:
+            return False
+        pixmap = screen.grabWindow(0)
+        if pixmap.isNull() or self._is_black_pixmap(pixmap):
+            return False
+        pixmap.save(SCREENSHOT_PATH, "PNG")
+        return True
+
+    def _is_black_pixmap(self, pixmap: QPixmap) -> bool:
+        """Return True if all sampled pixels are (near-)black.
+
+        Wayland compositors block grabWindow by returning a solid-black image
+        instead of raising an error, so we have to detect it ourselves.
+        """
+        image = pixmap.toImage()
+        w, h = image.width(), image.height()
+        if w == 0 or h == 0:
+            return True
+        for row_f, col_f in _SAMPLE_GRID:
+            pixel = image.pixel(int(w * col_f), int(h * row_f))
+            r = (pixel >> 16) & 0xFF
+            g = (pixel >> 8) & 0xFF
+            b = pixel & 0xFF
+            if r > _BLACK_THRESHOLD or g > _BLACK_THRESHOLD or b > _BLACK_THRESHOLD:
+                return False
+        return True
+
+    # ------------------------------------------------------------------
+    # Capture method 2: GNOME Shell DBus
+    # Works on GNOME Wayland (Ubuntu, Fedora, Debian GNOME…).
+    # Requires gdbus (part of glib2, installed by default on GNOME systems).
+    # ------------------------------------------------------------------
+
+    def _capture_via_dbus_gnome(self) -> bool:
+        gdbus = shutil.which("gdbus")
+        if not gdbus:
+            return False
+        cmd = [
+            gdbus, "call", "--session",
+            "--dest",        "org.gnome.Shell.Screenshot",
+            "--object-path", "/org/gnome/Shell/Screenshot",
+            "--method",      "org.gnome.Shell.Screenshot.Screenshot",
+            "true",           # include cursor
+            "false",          # no flash animation
+            SCREENSHOT_PATH,
+        ]
         try:
-            result = subprocess.run(cmd, capture_output=True, timeout=10)
-        except subprocess.TimeoutExpired:
-            self._notify_error("Захват экрана завис (timeout > 10 с)")
-            return
-        except OSError as exc:
-            self._notify_error(f"Не удалось запустить захват: {exc}")
-            return
-
+            result = subprocess.run(cmd, capture_output=True, timeout=15)
+        except (subprocess.TimeoutExpired, OSError):
+            return False
+        # gdbus prints "(true, '/tmp/...')" on success
         if result.returncode != 0:
-            stderr = result.stderr.decode(errors="replace").strip()
-            self._notify_error(f"Ошибка захвата (код {result.returncode}):\n{stderr}")
-            return
+            return False
+        out = result.stdout.decode(errors="replace").strip()
+        return out.startswith("(true,") and os.path.exists(SCREENSHOT_PATH)
 
-        self._open_canvas()
+    # ------------------------------------------------------------------
+    # Capture method 3: grim
+    # Works on wlroots-based Wayland compositors (Sway, Hyprland, River…).
+    # ------------------------------------------------------------------
+
+    def _capture_via_grim(self) -> bool:
+        grim = shutil.which("grim")
+        if not grim:
+            return False
+        try:
+            result = subprocess.run([grim, SCREENSHOT_PATH], capture_output=True, timeout=10)
+            return result.returncode == 0
+        except (subprocess.TimeoutExpired, OSError):
+            return False
+
+    # ------------------------------------------------------------------
+    # Capture method 4: maim
+    # X11 fallback (also handles edge cases where Qt grabWindow failed on X11).
+    # ------------------------------------------------------------------
+
+    def _capture_via_maim(self) -> bool:
+        maim = shutil.which("maim")
+        if not maim:
+            return False
+        try:
+            result = subprocess.run([maim, SCREENSHOT_PATH], capture_output=True, timeout=10)
+            return result.returncode == 0
+        except (subprocess.TimeoutExpired, OSError):
+            return False
 
     def _open_canvas(self) -> None:
         if self._canvas is not None:
