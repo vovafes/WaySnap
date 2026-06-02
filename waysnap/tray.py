@@ -6,7 +6,7 @@ import sys
 import time
 
 from PyQt6.QtCore import QCoreApplication, QRect, Qt, QTimer
-from PyQt6.QtGui import QColor, QFont, QIcon, QPainter, QPixmap
+from PyQt6.QtGui import QColor, QFont, QIcon, QPainter, QPixmap, QScreen
 from PyQt6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
 from .canvas import AnnotationCanvas
@@ -59,10 +59,32 @@ class TrayIconManager(QSystemTrayIcon):
 
     def _build_menu(self) -> None:
         menu = QMenu()
-        menu.addAction("Сделать скриншот").triggered.connect(self._trigger_screenshot)
+        # Rebuild screen list each time the menu is opened
+        menu.aboutToShow.connect(lambda: self._populate_menu(menu))
+        self._populate_menu(menu)
+        self.setContextMenu(menu)
+
+    def _populate_menu(self, menu: QMenu) -> None:
+        menu.clear()
+        screens = QApplication.screens()
+
+        if len(screens) == 1:
+            menu.addAction("Сделать скриншот").triggered.connect(
+                lambda: self._trigger_screenshot()
+            )
+        else:
+            menu.addAction("Все экраны").triggered.connect(
+                lambda: self._trigger_screenshot()
+            )
+            for i, s in enumerate(screens):
+                g     = s.geometry()
+                label = f"Экран {i + 1}  ({g.width()}×{g.height()})"
+                menu.addAction(label).triggered.connect(
+                    lambda checked=False, scr=s: self._trigger_screenshot(scr)
+                )
+
         menu.addSeparator()
         menu.addAction("Выход").triggered.connect(self._app.quit)
-        self.setContextMenu(menu)
 
     def _on_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
         if reason == QSystemTrayIcon.ActivationReason.Trigger:
@@ -70,15 +92,18 @@ class TrayIconManager(QSystemTrayIcon):
 
     # ── Step 1: hide UI, wait, capture full screen ────────────────────────────
 
-    def _trigger_screenshot(self) -> None:
+    def _trigger_screenshot(self, target_screen: QScreen | None = None) -> None:
         if menu := self.contextMenu():
             menu.hide()
         if self._canvas is not None:
             self._canvas.hide()
         QCoreApplication.processEvents()
-        QTimer.singleShot(_PRE_CAPTURE_DELAY_MS, self._capture_full_screen)
+        QTimer.singleShot(
+            _PRE_CAPTURE_DELAY_MS,
+            lambda: self._capture_full_screen(target_screen),
+        )
 
-    def _capture_full_screen(self) -> None:
+    def _capture_full_screen(self, target_screen: QScreen | None = None) -> None:
         desktop = self._detect_desktop()
         session = self._detect_session()
         log.info("Capturing full screen (desktop=%s, session=%s)", desktop, session)
@@ -108,7 +133,9 @@ class TrayIconManager(QSystemTrayIcon):
                 continue
 
             log.info("   SUCCESS")
-            self._open_canvas()
+            if target_screen is not None:
+                self._crop_screenshot_to_screen(target_screen)
+            self._open_canvas(target_screen)
             return
 
         log.error("All capture methods failed.")
@@ -120,10 +147,35 @@ class TrayIconManager(QSystemTrayIcon):
 
     # ── Step 2: show frozen overlay, user picks region ────────────────────────
 
-    def _open_canvas(self) -> None:
+    def _crop_screenshot_to_screen(self, screen: QScreen) -> None:
+        """Overwrite SCREENSHOT_PATH with only the pixels belonging to *screen*."""
+        px = QPixmap(SCREENSHOT_PATH)
+        if px.isNull():
+            return
+
+        # Virtual desktop bounding box (logical pixels, all screens combined)
+        virtual = QRect()
+        for s in QApplication.screens():
+            virtual = virtual.united(s.geometry())
+
+        # Scale from logical virtual-desktop coords to physical screenshot pixels
+        sx = px.width()  / virtual.width()
+        sy = px.height() / virtual.height()
+
+        g    = screen.geometry()
+        crop = QRect(
+            int((g.x() - virtual.x()) * sx),
+            int((g.y() - virtual.y()) * sy),
+            max(1, int(g.width()  * sx)),
+            max(1, int(g.height() * sy)),
+        )
+        log.info("Screen crop: logical %s → px %s", g, crop)
+        px.copy(crop).save(SCREENSHOT_PATH, "PNG")
+
+    def _open_canvas(self, target_screen: QScreen | None = None) -> None:
         if self._canvas is not None:
             self._canvas.close()
-        self._canvas = AnnotationCanvas(SCREENSHOT_PATH)
+        self._canvas = AnnotationCanvas(SCREENSHOT_PATH, target_screen=target_screen)
         self._canvas.region_confirmed.connect(self._on_region_confirmed)
         self._canvas.show()
 

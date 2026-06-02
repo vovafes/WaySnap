@@ -52,9 +52,10 @@ class AnnotationCanvas(QWidget):
 
     region_confirmed = pyqtSignal(QRect)
 
-    def __init__(self, screenshot_path: str) -> None:
+    def __init__(self, screenshot_path: str, target_screen=None) -> None:
         super().__init__()
-        self._bg = self._load_pixmap(screenshot_path)
+        self._bg            = self._load_pixmap(screenshot_path)
+        self._target_screen = target_screen   # QScreen | None
 
         self._sel   = QRect()
         self._state = "idle"
@@ -91,7 +92,9 @@ class AnnotationCanvas(QWidget):
         self.setCursor(Qt.CursorShape.CrossCursor)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
-        screen = QApplication.screenAt(QCursor.pos()) or QApplication.primaryScreen()
+        screen = (self._target_screen
+                  or QApplication.screenAt(QCursor.pos())
+                  or QApplication.primaryScreen())
         if screen:
             self.setGeometry(screen.geometry())
 
