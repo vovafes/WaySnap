@@ -270,10 +270,27 @@ class AnnotationCanvas(QWidget):
         self.raise_()
 
     def _position_toolbar(self) -> None:
-        self._toolbar.adjustSize()
-        x = (self.width() - self._toolbar.width()) // 2
-        self._toolbar.move(x, 16)
-        self._toolbar.raise_()
+        if not hasattr(self, "_toolbar"):
+            return
+        tb = self._toolbar
+        tb.adjustSize()
+        tw, th = tb.width(), tb.height()
+        sel = self._sel.normalized()
+
+        if sel.isEmpty():
+            # No selection yet — park at top-centre
+            tb.move((self.width() - tw) // 2, 16)
+        else:
+            # Centre horizontally on the selection
+            x = max(8, min(sel.center().x() - tw // 2, self.width() - tw - 8))
+            # Prefer just below; fall back to above if near screen bottom
+            y = sel.bottom() + 12
+            if y + th > self.height() - 8:
+                y = sel.top() - th - 12
+            tb.move(x, max(8, y))
+
+        tb.show()
+        tb.raise_()
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
@@ -435,6 +452,7 @@ class AnnotationCanvas(QWidget):
         self._drag_start = pos
         self._sel = QRect(pos, pos)
         self._state = "dragging"
+        self._toolbar.hide()
         self.update()
 
     def _move_select(self, pos: QPoint) -> None:
@@ -443,10 +461,12 @@ class AnnotationCanvas(QWidget):
             self.update()
         elif self._state == "resizing":
             self._sel = _apply_resize(self._resize_origin, self._resize_handle, pos)
+            self._position_toolbar()
             self.update()
         elif self._state == "moving":
             self._sel = _clamp(self._move_origin.translated(pos - self._move_anchor),
                                self.rect())
+            self._position_toolbar()
             self.update()
         else:
             self._refresh_cursor(pos)
@@ -457,6 +477,7 @@ class AnnotationCanvas(QWidget):
             self._sel   = norm if norm.width() >= 3 and norm.height() >= 3 else QRect()
             self._state = "selected" if not self._sel.isEmpty() else "idle"
             self._refresh_cursor(pos)
+            self._position_toolbar()
             self.update()
 
     # ── Drawing-tool mouse ────────────────────────────────────────────────────
@@ -501,6 +522,7 @@ class AnnotationCanvas(QWidget):
             elif self._state != "idle":
                 self._sel, self._state = QRect(), "idle"
                 self.setCursor(Qt.CursorShape.CrossCursor)
+                self._position_toolbar()
                 self.update()
             else:
                 self.close()
