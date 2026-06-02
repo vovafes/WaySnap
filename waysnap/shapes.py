@@ -8,7 +8,7 @@ import math
 from abc import ABC, abstractmethod
 
 from PyQt6.QtCore import QPoint, QRect, Qt
-from PyQt6.QtGui import QColor, QPainter, QPainterPath, QPen, QPolygon
+from PyQt6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen, QPolygon
 
 
 class Shape(ABC):
@@ -118,10 +118,38 @@ def _arrowhead(p: QPainter, start: QPoint, end: QPoint, width: int) -> None:
     p.drawPolygon(QPolygon([end, p1, p2]))
 
 
+class TextShape(Shape):
+    """A text label placed at a single anchor point."""
+
+    def __init__(self, color: QColor, width: int) -> None:
+        super().__init__(color, width)
+        self.pos  = QPoint()
+        self.text = ""
+
+    @property
+    def font_size(self) -> int:
+        return max(12, self.width * 4)
+
+    def draw(self, p: QPainter) -> None:
+        if not self.text:
+            return
+        font = QFont("Arial", self.font_size, QFont.Weight.Bold)
+        p.setFont(font)
+        # thin dark shadow for readability on any background
+        p.setPen(QPen(QColor(0, 0, 0, 140), 1))
+        p.drawText(self.pos + QPoint(1, 1), self.text)
+        p.setPen(QPen(self.color, 1))
+        p.drawText(self.pos, self.text)
+
+    def is_valid(self) -> bool:
+        return bool(self.text.strip())
+
+
 def make_shape(tool: str, color: QColor, width: int) -> Shape:
     return {
         "pencil":  Stroke,
         "arrow":   Arrow,
         "rect":    RectShape,
         "ellipse": EllipseShape,
+        "text":    TextShape,
     }[tool](color, width)

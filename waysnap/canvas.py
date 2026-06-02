@@ -1,17 +1,17 @@
 import enum
 import logging
 
-from PyQt6.QtCore import QPoint, QRect, QSize, Qt, pyqtSignal
+from PyQt6.QtCore import QEvent, QPoint, QRect, QSize, Qt, pyqtSignal
 from PyQt6.QtGui import (
     QColor, QCursor, QFont, QIcon, QKeyEvent, QMouseEvent,
     QPaintEvent, QPainter, QPen, QPixmap,
 )
 from PyQt6.QtWidgets import (
     QApplication, QButtonGroup, QColorDialog, QFrame,
-    QHBoxLayout, QPushButton, QSpinBox, QWidget,
+    QHBoxLayout, QLineEdit, QPushButton, QSpinBox, QWidget,
 )
 
-from .shapes import Shape, Stroke, make_shape
+from .shapes import Shape, Stroke, TextShape, make_shape
 
 log = logging.getLogger(__name__)
 
@@ -56,11 +56,12 @@ class _Toolbar(QFrame):
     undo_requested = pyqtSignal()
 
     _TOOLS = [
-        ("select",  "⬚", "Select  [S]"),
-        ("pencil",  "✏", "Pencil  [P]"),
-        ("arrow",   "↗", "Arrow   [A]"),
-        ("rect",    "▭", "Rect    [R]"),
-        ("ellipse", "⬭", "Ellipse [E]"),
+        ("select",  "⬚",  "Select  [S]"),
+        ("pencil",  "✏",  "Pencil  [P]"),
+        ("arrow",   "➤",  "Arrow   [A]"),
+        ("rect",    "□",  "Rect    [R]"),
+        ("ellipse", "○",  "Ellipse [E]"),
+        ("text",    "T",  "Text    [T]"),
     ]
 
     def __init__(self, parent: QWidget) -> None:
@@ -224,6 +225,7 @@ class AnnotationCanvas(QWidget):
         self._current: Shape | None = None
         self._pen_color = QColor(_DEFAULT_CLR)
         self._pen_width = _DEFAULT_W
+        self._text_input: QLineEdit | None = None
 
         self._setup_window()
 
@@ -316,7 +318,9 @@ class AnnotationCanvas(QWidget):
         self._pen_width = width
 
     def _undo(self) -> None:
-        if self._shapes:
+        if self._text_input is not None:
+            self._cancel_text_input()
+        elif self._shapes:
             self._shapes.pop()
             self.update()
 
@@ -381,7 +385,9 @@ class AnnotationCanvas(QWidget):
 
     def _paint_hint(self, p: QPainter) -> None:
         if self._tool == "select":
-            text = "S/P/A/R/E — tools  •  Enter — save  •  Esc — reset / close"
+            text = "S/P/A/R/E/T — tools  •  Enter — save  •  Esc — reset / close"
+        elif self._tool == "text":
+            text = "Text: click to place  •  Ctrl+Z — undo  •  Enter — save  •  Esc — close"
         else:
             tool_names = {"pencil": "Pencil", "arrow": "Arrow",
                           "rect": "Rect", "ellipse": "Ellipse"}
@@ -483,6 +489,9 @@ class AnnotationCanvas(QWidget):
     # ── Drawing-tool mouse ────────────────────────────────────────────────────
 
     def _press_draw(self, pos: QPoint) -> None:
+        if self._tool == "text":
+            self._start_text_input(pos)
+            return
         self._current = make_shape(self._tool, self._pen_color, self._pen_width)
         if isinstance(self._current, Stroke):
             self._current.points.append(pos)
@@ -505,6 +514,71 @@ class AnnotationCanvas(QWidget):
         self._current = None
         self.update()
 
+    # ── Text input ────────────────────────────────────────────────────────────
+
+    def _start_text_input(self, pos: QPoint) -> None:
+        """Open an inline QLineEdit at *pos* for text annotation."""
+        self._finalize_text_input()   # commit any previous input first
+
+        font_size = max(12, self._pen_width * 4)
+        font = QFont("Arial", font_size, QFont.Weight.Bold)
+
+        inp = QLineEdit(self)
+        inp.setFont(font)
+        inp.setMinimumWidth(180)
+        inp.setPlaceholderText("Type text…")
+        inp.setStyleSheet(
+            f"background: rgba(0,0,0,160);"
+            f"color: {self._pen_color.name()};"
+            f"border: 1px dashed rgba(255,255,255,160);"
+            f"border-radius: 3px;"
+            f"padding: 2px 6px;"
+        )
+        inp.adjustSize()
+        # Place so the text baseline lands roughly at the click point
+        inp.move(pos.x(), pos.y() - inp.height() // 2)
+        inp.show()
+        inp.setFocus()
+        inp.installEventFilter(self)
+
+        inp.returnPressed.connect(self._finalize_text_input)
+        inp.setProperty("_anchor", pos)
+
+        self._text_input = inp
+
+    def _finalize_text_input(self) -> None:
+        inp = self._text_input
+        if inp is None:
+            return
+        text = inp.text().strip()
+        if text:
+            shape = TextShape(self._pen_color, self._pen_width)
+            # Anchor at the vertical centre of the input widget
+            shape.pos  = inp.property("_anchor") or inp.pos()
+            shape.text = text
+            self._shapes.append(shape)
+        self._text_input = None
+        inp.hide()
+        inp.deleteLater()
+        self.setFocus()
+        self.update()
+
+    def _cancel_text_input(self) -> None:
+        inp = self._text_input
+        if inp is None:
+            return
+        self._text_input = None
+        inp.hide()
+        inp.deleteLater()
+        self.setFocus()
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802
+        if obj is self._text_input and event.type() == QEvent.Type.KeyPress:
+            if event.key() == Qt.Key.Key_Escape:
+                self._cancel_text_input()
+                return True
+        return super().eventFilter(obj, event)
+
     # ── Keyboard ──────────────────────────────────────────────────────────────
 
     def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802
@@ -514,8 +588,9 @@ class AnnotationCanvas(QWidget):
         if k in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space):
             self._confirm()
         elif k == Qt.Key.Key_Escape:
-            if self._shapes:
-                # First ESC clears drawings
+            if self._text_input is not None:
+                self._cancel_text_input()
+            elif self._shapes:
                 self._shapes.clear()
                 self._current = None
                 self.update()
@@ -528,23 +603,22 @@ class AnnotationCanvas(QWidget):
                 self.close()
         elif mod == Qt.KeyboardModifier.ControlModifier and k == Qt.Key.Key_Z:
             self._undo()
-        # Tool shortcuts
-        elif k == Qt.Key.Key_S:
-            self._set_tool("select");  self._toolbar.select_tool("select")
-        elif k == Qt.Key.Key_P:
-            self._set_tool("pencil");  self._toolbar.select_tool("pencil")
-        elif k == Qt.Key.Key_A:
-            self._set_tool("arrow");   self._toolbar.select_tool("arrow")
-        elif k == Qt.Key.Key_R:
-            self._set_tool("rect");    self._toolbar.select_tool("rect")
-        elif k == Qt.Key.Key_E:
-            self._set_tool("ellipse"); self._toolbar.select_tool("ellipse")
+        # Tool shortcuts (only when text input is not active)
+        elif self._text_input is None:
+            if   k == Qt.Key.Key_S: self._set_tool("select");  self._toolbar.select_tool("select")
+            elif k == Qt.Key.Key_P: self._set_tool("pencil");  self._toolbar.select_tool("pencil")
+            elif k == Qt.Key.Key_A: self._set_tool("arrow");   self._toolbar.select_tool("arrow")
+            elif k == Qt.Key.Key_R: self._set_tool("rect");    self._toolbar.select_tool("rect")
+            elif k == Qt.Key.Key_E: self._set_tool("ellipse"); self._toolbar.select_tool("ellipse")
+            elif k == Qt.Key.Key_T: self._set_tool("text");    self._toolbar.select_tool("text")
+            else: super().keyPressEvent(event)
         else:
             super().keyPressEvent(event)
 
     # ── Confirm ───────────────────────────────────────────────────────────────
 
     def _confirm(self) -> None:
+        self._finalize_text_input()   # commit any open text before saving
         sel = self._sel.normalized()
         if sel.width() < 3 or sel.height() < 3:
             log.warning("No region selected — cannot save")
