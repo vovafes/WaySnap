@@ -7,7 +7,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from PyQt6.QtCore import QCoreApplication, Qt, QTimer
+from PyQt6.QtCore import QCoreApplication, QRect, Qt, QTimer
 from PyQt6.QtGui import QColor, QFont, QIcon, QPainter, QPixmap, QScreen
 from PyQt6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
