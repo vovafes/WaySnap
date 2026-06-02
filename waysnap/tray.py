@@ -2,6 +2,7 @@ import logging
 import os
 import shutil
 import subprocess
+import sys
 import time
 
 from PyQt6.QtCore import QCoreApplication, QRect, Qt, QTimer
@@ -13,6 +14,7 @@ from .canvas import AnnotationCanvas
 log = logging.getLogger(__name__)
 
 SCREENSHOT_PATH = "/tmp/waysnap_shot.png"
+_PORTAL_HELPER  = os.path.join(os.path.dirname(__file__), "portal_helper.py")
 REGION_PATH     = "/tmp/waysnap_region.png"
 
 # ── Timing ────────────────────────────────────────────────────────────────────
@@ -193,16 +195,23 @@ class TrayIconManager(QSystemTrayIcon):
         return "x11"
 
     def _build_capture_chain(self, desktop: str, session: str) -> list:
+        # XDG portal is first everywhere on Wayland: it works on GNOME 42+,
+        # KDE Plasma 5.25+, and any compositor that ships xdg-desktop-portal.
         if desktop == "gnome":
-            return [self._capture_gnome_screenshot,
+            return [self._capture_via_portal,
+                    self._capture_gnome_screenshot,
                     self._capture_gdbus_gnome,
                     self._capture_maim]
         if desktop == "kde":
-            return [self._capture_spectacle,
+            return [self._capture_via_portal,
+                    self._capture_spectacle,
                     self._capture_grim,
                     self._capture_maim]
         if session == "wayland":
-            return [self._capture_grim, self._capture_gdbus_gnome, self._capture_maim]
+            return [self._capture_via_portal,
+                    self._capture_grim,
+                    self._capture_gdbus_gnome,
+                    self._capture_maim]
         return [self._capture_maim, self._capture_grim]
 
     # ── Shared helpers ────────────────────────────────────────────────────────
@@ -261,6 +270,19 @@ class TrayIconManager(QSystemTrayIcon):
         return True
 
     # ── Capture methods ───────────────────────────────────────────────────────
+
+    def _capture_via_portal(self) -> bool:
+        """XDG Desktop Portal — universal Wayland method (GNOME 42+, KDE 5.25+).
+
+        Runs portal_helper.py as a subprocess so GLib's event loop doesn't
+        conflict with Qt's.  Requires python3-gi (pre-installed on Ubuntu GNOME
+        and Fedora; install on others: sudo apt install python3-gi).
+        """
+        if not os.path.isfile(_PORTAL_HELPER):
+            log.error("portal_helper.py not found: %s", _PORTAL_HELPER)
+            return False
+        r = self._run([sys.executable, _PORTAL_HELPER, SCREENSHOT_PATH], timeout=20)
+        return r is not None and self._wait_for_file()
 
     def _capture_gnome_screenshot(self) -> bool:
         """gnome-screenshot (sudo apt install gnome-screenshot) — GNOME Wayland."""
