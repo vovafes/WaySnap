@@ -277,7 +277,8 @@ class AnnotationCanvas(QWidget):
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
-        self._position_toolbar()
+        if hasattr(self, "_toolbar"):
+            self._position_toolbar()
 
     # ── Tool management ───────────────────────────────────────────────────────
 
