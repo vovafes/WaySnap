@@ -1,6 +1,7 @@
 import os
 import shutil
 import subprocess
+import time
 
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QColor, QFont, QIcon, QPainter, QPixmap
@@ -11,15 +12,12 @@ from .canvas import AnnotationCanvas
 SCREENSHOT_PATH = "/tmp/waysnap_shot.png"
 CAPTURE_DELAY_MS = 300  # ms to wait after hiding menu so it disappears from screen
 
-# Pixels sampled for black-screen detection (row_fraction, col_fraction)
-_SAMPLE_GRID = [
-    (0.25, 0.25), (0.25, 0.50), (0.25, 0.75),
-    (0.50, 0.25), (0.50, 0.50), (0.50, 0.75),
-    (0.75, 0.25), (0.75, 0.50), (0.75, 0.75),
-]
-# Wayland security blocks grabWindow by returning a fully-black image;
-# any pixel above this threshold means the grab actually worked.
-_BLACK_THRESHOLD = 5
+# Minimum file size that counts as a real screenshot (any valid PNG >> this).
+# Guards against opening a canvas over an empty or truncated file.
+_FILE_MIN_BYTES = 4096
+# How long to poll for the file after the DBus call (seconds).
+_FILE_POLL_INTERVAL = 0.1
+_FILE_POLL_TIMEOUT = 2.0
 
 
 class TrayIconManager(QSystemTrayIcon):
@@ -87,9 +85,8 @@ class TrayIconManager(QSystemTrayIcon):
     def _capture_screen(self) -> None:
         """Try capture methods in priority order; open canvas on first success."""
         methods = [
-            self._capture_via_qt,         # X11 + some Wayland compositors
-            self._capture_via_dbus_gnome,  # GNOME Wayland (Ubuntu, Fedora, etc.)
-            self._capture_via_grim,        # wlroots Wayland (Sway, Hyprland, etc.)
+            self._capture_via_dbus_gnome,  # GNOME Wayland — primary on modern Ubuntu/Fedora
+            self._capture_via_grim,        # wlroots Wayland (Sway, Hyprland, River…)
             self._capture_via_maim,        # X11 fallback
         ]
         for method in methods:
@@ -99,77 +96,65 @@ class TrayIconManager(QSystemTrayIcon):
 
         self._notify_error(
             "Не удалось сделать скриншот ни одним из доступных методов.\n\n"
-            "Wayland (GNOME/KDE): должен работать без установки утилит.\n"
-            "Wayland (Sway/Hyprland): установите grim → sudo apt install grim\n"
-            "X11: установите maim → sudo apt install maim"
+            "Wayland (GNOME): gdbus должен быть установлен по умолчанию.\n"
+            "Wayland (Sway/Hyprland): sudo apt install grim\n"
+            "X11: sudo apt install maim"
         )
 
     # ------------------------------------------------------------------
-    # Capture method 1: Qt native grabWindow
-    # Works on X11 and some Wayland compositors.
-    # On security-restricted Wayland it returns a black image — detected below.
-    # ------------------------------------------------------------------
-
-    def _capture_via_qt(self) -> bool:
-        screen = QApplication.primaryScreen()
-        if screen is None:
-            return False
-        pixmap = screen.grabWindow(0)
-        if pixmap.isNull() or self._is_black_pixmap(pixmap):
-            return False
-        pixmap.save(SCREENSHOT_PATH, "PNG")
-        return True
-
-    def _is_black_pixmap(self, pixmap: QPixmap) -> bool:
-        """Return True if all sampled pixels are (near-)black.
-
-        Wayland compositors block grabWindow by returning a solid-black image
-        instead of raising an error, so we have to detect it ourselves.
-        """
-        image = pixmap.toImage()
-        w, h = image.width(), image.height()
-        if w == 0 or h == 0:
-            return True
-        for row_f, col_f in _SAMPLE_GRID:
-            pixel = image.pixel(int(w * col_f), int(h * row_f))
-            r = (pixel >> 16) & 0xFF
-            g = (pixel >> 8) & 0xFF
-            b = pixel & 0xFF
-            if r > _BLACK_THRESHOLD or g > _BLACK_THRESHOLD or b > _BLACK_THRESHOLD:
-                return False
-        return True
-
-    # ------------------------------------------------------------------
-    # Capture method 2: GNOME Shell DBus
-    # Works on GNOME Wayland (Ubuntu, Fedora, Debian GNOME…).
-    # Requires gdbus (part of glib2, installed by default on GNOME systems).
+    # Capture method 1: GNOME Shell DBus
+    # Primary method on GNOME Wayland (Ubuntu, Fedora, Debian GNOME…).
+    # gdbus is part of glib2 and present by default on all GNOME systems.
     # ------------------------------------------------------------------
 
     def _capture_via_dbus_gnome(self) -> bool:
         gdbus = shutil.which("gdbus")
         if not gdbus:
             return False
+
+        # Remove stale file from a previous run so the size-check below is reliable.
+        try:
+            os.remove(SCREENSHOT_PATH)
+        except FileNotFoundError:
+            pass
+
         cmd = [
             gdbus, "call", "--session",
             "--dest",        "org.gnome.Shell.Screenshot",
             "--object-path", "/org/gnome/Shell/Screenshot",
             "--method",      "org.gnome.Shell.Screenshot.Screenshot",
-            "true",           # include cursor
-            "false",          # no flash animation
+            "true",   # include cursor
+            "false",  # no flash animation
             SCREENSHOT_PATH,
         ]
         try:
             result = subprocess.run(cmd, capture_output=True, timeout=15)
         except (subprocess.TimeoutExpired, OSError):
             return False
-        # gdbus prints "(true, '/tmp/...')" on success
+
         if result.returncode != 0:
             return False
+
+        # gdbus prints "(true, '/tmp/...')\n" on success
         out = result.stdout.decode(errors="replace").strip()
-        return out.startswith("(true,") and os.path.exists(SCREENSHOT_PATH)
+        if not out.startswith("(true,"):
+            return False
+
+        # The DBus response can arrive before the compositor finishes writing the
+        # PNG to disk. Poll until the file reaches a sane size or we time out.
+        deadline = time.monotonic() + _FILE_POLL_TIMEOUT
+        while time.monotonic() < deadline:
+            try:
+                if os.path.getsize(SCREENSHOT_PATH) >= _FILE_MIN_BYTES:
+                    return True
+            except OSError:
+                pass
+            time.sleep(_FILE_POLL_INTERVAL)
+
+        return False
 
     # ------------------------------------------------------------------
-    # Capture method 3: grim
+    # Capture method 2: grim
     # Works on wlroots-based Wayland compositors (Sway, Hyprland, River…).
     # ------------------------------------------------------------------
 
@@ -184,8 +169,8 @@ class TrayIconManager(QSystemTrayIcon):
             return False
 
     # ------------------------------------------------------------------
-    # Capture method 4: maim
-    # X11 fallback (also handles edge cases where Qt grabWindow failed on X11).
+    # Capture method 3: maim
+    # X11 fallback.
     # ------------------------------------------------------------------
 
     def _capture_via_maim(self) -> bool:
