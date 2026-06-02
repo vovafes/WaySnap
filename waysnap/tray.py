@@ -12,6 +12,7 @@ from PyQt6.QtGui import QColor, QFont, QIcon, QPainter, QPixmap, QScreen
 from PyQt6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
 from .canvas import AnnotationCanvas
+from .hotkey import HotkeyManager
 
 log = logging.getLogger(__name__)
 
@@ -57,6 +58,10 @@ class TrayIconManager(QSystemTrayIcon):
         self.setToolTip("WaySnap")
         self._build_menu()
         self.activated.connect(self._on_activated)
+
+        self._hotkey = HotkeyManager()
+        self._hotkey.triggered.connect(self._trigger_screenshot)
+        app.aboutToQuit.connect(self._hotkey.stop)
 
     # ── Icon ──────────────────────────────────────────────────────────────────
 

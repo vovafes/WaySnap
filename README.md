@@ -6,6 +6,7 @@ Built with Python 3 and PyQt6, designed for both X11 and Wayland.
 ## Features
 
 - Runs in the system tray
+- Global hotkey **Ctrl+PrintScreen** triggers capture from anywhere
 - Capture a custom region by dragging a selection rectangle
 - Capture a specific monitor on multi-display setups
 - 8-handle resize + drag-to-move the selection
@@ -22,6 +23,10 @@ Built with Python 3 and PyQt6, designed for both X11 and Wayland.
 | X11 | `maim` | `sudo apt install maim` |
 
 Only one tool is needed depending on your desktop environment.
+
+> **GNOME Wayland + hotkey:** GNOME intercepts the bare `PrintScreen` key.
+> To let `Ctrl+PrintScreen` reach WaySnap, disable the conflicting shortcut:
+> **Settings → Keyboard → Keyboard Shortcuts → Screenshots → disable "Take a screenshot"**
 
 ## Installation
 
@@ -55,5 +60,6 @@ WaySnap/
 └── waysnap/
     ├── tray.py              # TrayIconManager — menu, capture chain, save
     ├── canvas.py            # AnnotationCanvas — fullscreen selection overlay
+    ├── hotkey.py            # HotkeyManager — global Ctrl+PrintScreen listener
     └── portal_helper.py     # XDG Desktop Portal screenshot helper (subprocess)
 ```
