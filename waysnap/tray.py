@@ -23,6 +23,13 @@ _FILE_MIN_BYTES   = 4096  # a real screenshot PNG is always >> this
 _FILE_POLL_S      = 0.1   # poll interval while waiting for file to appear
 _FILE_POLL_MAX_S  = 3.0   # give up after this many seconds
 
+# ── Black-image detection ─────────────────────────────────────────────────────
+# maim via XWayland on GNOME Wayland captures the X11 root window which is
+# black (GNOME Shell and all modern apps are Wayland-native, invisible to X11).
+# We sample a 4×4 grid; if every point is near-black, the capture is useless.
+_BLACK_SAMPLE_GRID = [(r, c) for r in (0.2, 0.4, 0.6, 0.8) for c in (0.2, 0.4, 0.6, 0.8)]
+_BLACK_CHANNEL_MAX = 15   # 0-255; any channel above this means real content
+
 
 class TrayIconManager(QSystemTrayIcon):
     def __init__(self, app: QApplication) -> None:
@@ -113,20 +120,29 @@ class TrayIconManager(QSystemTrayIcon):
                 log.error("   %s raised unexpectedly: %s", method.__name__, exc)
                 ok = False
 
-            if ok:
-                log.info("   SUCCESS via %s", method.__name__)
-                self._open_canvas()
-                return
-            else:
+            if not ok:
                 log.warning("   FAILED, trying next method …")
+                continue
+
+            # File exists and has size — but is it actually a real screenshot?
+            if self._is_black_screenshot():
+                log.warning(
+                    "   %s produced a BLACK image — X11 root window is invisible "
+                    "on Wayland. Treating as failure.", method.__name__
+                )
+                continue
+
+            log.info("   SUCCESS via %s", method.__name__)
+            self._open_canvas()
+            return
 
         log.error("All capture methods exhausted. Screenshot not taken.")
         self._notify_error(
             "Не удалось сделать скриншот ни одним из доступных методов.\n\n"
-            "Смотрите подробности в консоли (python main.py).\n\n"
-            "GNOME  → нужен gnome-screenshot или gdbus\n"
-            "KDE    → нужен spectacle\n"
-            "Sway/Hyprland → нужен grim"
+            "Для GNOME Wayland (Ubuntu) установите gnome-screenshot:\n"
+            "  sudo apt install gnome-screenshot\n\n"
+            "Sway/Hyprland → sudo apt install grim\n"
+            "Подробности: python main.py в терминале"
         )
 
     # ── Environment detection ─────────────────────────────────────────────────
@@ -223,6 +239,35 @@ class TrayIconManager(QSystemTrayIcon):
             _FILE_MIN_BYTES, _FILE_POLL_MAX_S, final,
         )
         return False
+
+    def _is_black_screenshot(self) -> bool:
+        """Return True if every sampled pixel in SCREENSHOT_PATH is near-black.
+
+        maim on GNOME Wayland captures the X11 root window via XWayland; that
+        window has no Wayland content and is a solid or near-solid black surface.
+        A file can be non-zero in size yet contain only a black image.
+        """
+        px = QPixmap(SCREENSHOT_PATH)
+        if px.isNull():
+            log.error("   _is_black_screenshot: QPixmap failed to load file")
+            return True
+
+        img = px.toImage()
+        w, h = img.width(), img.height()
+        log.debug("   image dimensions: %d×%d", w, h)
+
+        for row_f, col_f in _BLACK_SAMPLE_GRID:
+            pixel = img.pixel(int(w * col_f), int(h * row_f))
+            r = (pixel >> 16) & 0xFF
+            g = (pixel >> 8)  & 0xFF
+            b =  pixel        & 0xFF
+            if r > _BLACK_CHANNEL_MAX or g > _BLACK_CHANNEL_MAX or b > _BLACK_CHANNEL_MAX:
+                log.debug("   non-black pixel found at (%.0f%%,%.0f%%): rgb(%d,%d,%d)",
+                          col_f * 100, row_f * 100, r, g, b)
+                return False
+
+        log.warning("   all 16 sample points are near-black → image is black")
+        return True
 
     # ── Capture methods ───────────────────────────────────────────────────────
 

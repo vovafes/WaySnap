@@ -93,6 +93,9 @@ class AnnotationCanvas(QWidget):
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
         )
+        # Tell Qt that paintEvent covers the entire widget so it must not
+        # pre-fill with the background colour before calling paintEvent.
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
         self.setMouseTracking(True)   # cursor updates even without button held
         self.setCursor(Qt.CursorShape.CrossCursor)
 
