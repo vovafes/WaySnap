@@ -1,8 +1,15 @@
+import logging
 import sys
 
 from PyQt6.QtWidgets import QApplication, QSystemTrayIcon
 
 from waysnap.tray import TrayIconManager
+
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
+    datefmt="%H:%M:%S",
+)
 
 
 def main() -> None:

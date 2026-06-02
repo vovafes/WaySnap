@@ -1,23 +1,27 @@
+import logging
 import os
 import shutil
 import subprocess
 import time
 
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import QCoreApplication, Qt, QTimer
 from PyQt6.QtGui import QColor, QFont, QIcon, QPainter, QPixmap
 from PyQt6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
 from .canvas import AnnotationCanvas
 
-SCREENSHOT_PATH = "/tmp/waysnap_shot.png"
-CAPTURE_DELAY_MS = 300  # ms to wait after hiding menu so it disappears from screen
+log = logging.getLogger(__name__)
 
-# Minimum file size that counts as a real screenshot (any valid PNG >> this).
-# Guards against opening a canvas over an empty or truncated file.
-_FILE_MIN_BYTES = 4096
-# How long to poll for the file after the DBus call (seconds).
-_FILE_POLL_INTERVAL = 0.1
-_FILE_POLL_TIMEOUT = 2.0
+SCREENSHOT_PATH = "/tmp/waysnap_shot.png"
+
+# ── Timing constants ──────────────────────────────────────────────────────────
+CAPTURE_DELAY_MS = 300   # ms: QTimer delay after hiding menu (gives WM time to redraw)
+_PRE_CAPTURE_SLEEP = 0.4 # s:  extra sleep inside _capture_screen (compositor settle)
+
+# ── File validation ───────────────────────────────────────────────────────────
+_FILE_MIN_BYTES   = 4096  # a real screenshot PNG is always >> this
+_FILE_POLL_S      = 0.1   # poll interval while waiting for file to appear
+_FILE_POLL_MAX_S  = 3.0   # give up after this many seconds
 
 
 class TrayIconManager(QSystemTrayIcon):
@@ -28,176 +32,259 @@ class TrayIconManager(QSystemTrayIcon):
 
         self.setIcon(self._make_placeholder_icon())
         self.setToolTip("WaySnap — нажмите для скриншота")
-
         self._build_menu()
-
-        # Single click on tray icon also triggers screenshot
         self.activated.connect(self._on_activated)
 
-    # ------------------------------------------------------------------
-    # Icon
-    # ------------------------------------------------------------------
+    # ── Icon ──────────────────────────────────────────────────────────────────
 
     def _make_placeholder_icon(self) -> QIcon:
-        """Blue 32×32 square with 'WS' text — placeholder until real icon is added."""
         pixmap = QPixmap(32, 32)
         pixmap.fill(QColor("#2979FF"))
-
-        painter = QPainter(pixmap)
-        painter.setPen(QColor("white"))
-        font = QFont("Arial", 10, QFont.Weight.Bold)
-        painter.setFont(font)
-        painter.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter, "WS")
-        painter.end()
-
+        p = QPainter(pixmap)
+        p.setPen(QColor("white"))
+        p.setFont(QFont("Arial", 10, QFont.Weight.Bold))
+        p.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter, "WS")
+        p.end()
         return QIcon(pixmap)
 
-    # ------------------------------------------------------------------
-    # Menu
-    # ------------------------------------------------------------------
+    # ── Menu ──────────────────────────────────────────────────────────────────
 
     def _build_menu(self) -> None:
         menu = QMenu()
-
-        act_shot = menu.addAction("Сделать скриншот")
-        act_shot.triggered.connect(self._trigger_screenshot)
-
+        menu.addAction("Сделать скриншот").triggered.connect(self._trigger_screenshot)
         menu.addSeparator()
-
-        act_exit = menu.addAction("Выход")
-        act_exit.triggered.connect(self._app.quit)
-
+        menu.addAction("Выход").triggered.connect(self._app.quit)
         self.setContextMenu(menu)
 
     def _on_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
         if reason == QSystemTrayIcon.ActivationReason.Trigger:
             self._trigger_screenshot()
 
-    # ------------------------------------------------------------------
-    # Screenshot pipeline
-    # ------------------------------------------------------------------
+    # ── Screenshot pipeline ───────────────────────────────────────────────────
 
     def _trigger_screenshot(self) -> None:
+        # 1. Hide menu popup
         if menu := self.contextMenu():
             menu.hide()
+
+        # 2. Hide canvas if it was open from a previous shot
+        if self._canvas is not None:
+            self._canvas.hide()
+
+        # 3. Flush all pending Qt/WM events so the windows are gone from screen
+        QCoreApplication.processEvents()
+
+        # 4. Fire capture after a compositor-settle delay
         QTimer.singleShot(CAPTURE_DELAY_MS, self._capture_screen)
 
     def _capture_screen(self) -> None:
-        """Try capture methods in priority order; open canvas on first success."""
-        methods = [
-            self._capture_via_dbus_gnome,  # GNOME Wayland — primary on modern Ubuntu/Fedora
-            self._capture_via_grim,        # wlroots Wayland (Sway, Hyprland, River…)
-            self._capture_via_maim,        # X11 fallback
-        ]
-        for method in methods:
-            if method():
-                self._open_canvas()
-                return
+        # Extra sleep: gives the compositor time to finish redrawing after our
+        # windows disappeared.  Without this, fast compositors sometimes still
+        # include the WaySnap UI in the very first captured frame.
+        log.info("Pre-capture sleep %.1f s …", _PRE_CAPTURE_SLEEP)
+        time.sleep(_PRE_CAPTURE_SLEEP)
 
-        self._notify_error(
-            "Не удалось сделать скриншот ни одним из доступных методов.\n\n"
-            "Wayland (GNOME): gdbus должен быть установлен по умолчанию.\n"
-            "Wayland (Sway/Hyprland): sudo apt install grim\n"
-            "X11: sudo apt install maim"
+        desktop = self._detect_desktop()
+        session = self._detect_session()
+        log.info(
+            "Environment: XDG_CURRENT_DESKTOP=%r  XDG_SESSION_TYPE=%r  "
+            "→ desktop=%s  session=%s",
+            os.environ.get("XDG_CURRENT_DESKTOP", "(unset)"),
+            os.environ.get("XDG_SESSION_TYPE",    "(unset)"),
+            desktop, session,
         )
 
-    # ------------------------------------------------------------------
-    # Capture method 1: GNOME Shell DBus
-    # Primary method on GNOME Wayland (Ubuntu, Fedora, Debian GNOME…).
-    # gdbus is part of glib2 and present by default on all GNOME systems.
-    # ------------------------------------------------------------------
+        # Build an ordered capture chain for this desktop/session combo
+        chain = self._build_capture_chain(desktop, session)
+        log.info("Capture chain: %s", [m.__name__ for m in chain])
 
-    def _capture_via_dbus_gnome(self) -> bool:
-        gdbus = shutil.which("gdbus")
-        if not gdbus:
-            return False
-
-        # Remove stale file from a previous run so the size-check below is reliable.
+        # Remove stale file so the size-check cannot accidentally pass
         try:
             os.remove(SCREENSHOT_PATH)
+            log.debug("Removed stale %s", SCREENSHOT_PATH)
         except FileNotFoundError:
             pass
 
-        cmd = [
-            gdbus, "call", "--session",
+        for method in chain:
+            log.info("── Trying: %s", method.__name__)
+            try:
+                ok = method()
+            except Exception as exc:
+                log.error("   %s raised unexpectedly: %s", method.__name__, exc)
+                ok = False
+
+            if ok:
+                log.info("   SUCCESS via %s", method.__name__)
+                self._open_canvas()
+                return
+            else:
+                log.warning("   FAILED, trying next method …")
+
+        log.error("All capture methods exhausted. Screenshot not taken.")
+        self._notify_error(
+            "Не удалось сделать скриншот ни одним из доступных методов.\n\n"
+            "Смотрите подробности в консоли (python main.py).\n\n"
+            "GNOME  → нужен gnome-screenshot или gdbus\n"
+            "KDE    → нужен spectacle\n"
+            "Sway/Hyprland → нужен grim"
+        )
+
+    # ── Environment detection ─────────────────────────────────────────────────
+
+    @staticmethod
+    def _detect_desktop() -> str:
+        raw = os.environ.get("XDG_CURRENT_DESKTOP", "").upper()
+        if "GNOME" in raw:
+            return "gnome"
+        if "KDE" in raw:
+            return "kde"
+        return "generic"
+
+    @staticmethod
+    def _detect_session() -> str:
+        if os.environ.get("XDG_SESSION_TYPE", "").lower() == "wayland":
+            return "wayland"
+        if os.environ.get("WAYLAND_DISPLAY"):
+            return "wayland"
+        return "x11"
+
+    def _build_capture_chain(self, desktop: str, session: str) -> list:
+        if desktop == "gnome":
+            # gnome-screenshot is the most reliable on GNOME Wayland;
+            # gdbus is the fallback if gnome-screenshot is not installed.
+            return [
+                self._capture_gnome_screenshot,
+                self._capture_gdbus_gnome,
+                self._capture_grim,
+                self._capture_maim,
+            ]
+        if desktop == "kde":
+            return [
+                self._capture_spectacle,
+                self._capture_grim,
+                self._capture_maim,
+            ]
+        # Generic / unknown DE
+        if session == "wayland":
+            return [self._capture_grim, self._capture_gdbus_gnome]
+        return [self._capture_maim, self._capture_grim]
+
+    # ── Shared helpers ────────────────────────────────────────────────────────
+
+    def _run(self, cmd: list[str], timeout: int = 15) -> "subprocess.CompletedProcess | None":
+        """Run *cmd*, log stdout/stderr, return CompletedProcess on success or None."""
+        log.debug("   $ %s", " ".join(cmd))
+        binary = shutil.which(cmd[0])
+        if binary is None:
+            log.debug("   binary not found in PATH: %s", cmd[0])
+            return None
+        cmd = [binary] + cmd[1:]
+        try:
+            result = subprocess.run(cmd, capture_output=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            log.error("   command timed out (%d s): %s", timeout, cmd[0])
+            return None
+        except OSError as exc:
+            log.error("   OSError: %s", exc)
+            return None
+
+        if result.stdout.strip():
+            log.debug("   stdout: %s", result.stdout.decode(errors="replace").strip())
+        if result.stderr.strip():
+            log.warning("   stderr: %s", result.stderr.decode(errors="replace").strip())
+
+        if result.returncode != 0:
+            log.error("   exit code %d", result.returncode)
+            return None
+        return result
+
+    def _wait_for_file(self) -> bool:
+        """Poll until SCREENSHOT_PATH exists and is ≥ _FILE_MIN_BYTES, or time out."""
+        deadline = time.monotonic() + _FILE_POLL_MAX_S
+        while time.monotonic() < deadline:
+            try:
+                size = os.path.getsize(SCREENSHOT_PATH)
+                if size >= _FILE_MIN_BYTES:
+                    log.debug("   file ready: %d bytes", size)
+                    return True
+                log.debug("   file exists but too small (%d bytes), waiting …", size)
+            except OSError:
+                pass
+            time.sleep(_FILE_POLL_S)
+
+        try:
+            final = os.path.getsize(SCREENSHOT_PATH)
+        except OSError:
+            final = 0
+        log.error(
+            "   file did not reach %d bytes within %.1f s (final size: %d bytes)",
+            _FILE_MIN_BYTES, _FILE_POLL_MAX_S, final,
+        )
+        return False
+
+    # ── Capture methods ───────────────────────────────────────────────────────
+
+    def _capture_gnome_screenshot(self) -> bool:
+        """gnome-screenshot — GNOME Wayland primary (Ubuntu, Fedora, Debian)."""
+        result = self._run(["gnome-screenshot", "-f", SCREENSHOT_PATH])
+        if result is None:
+            return False
+        return self._wait_for_file()
+
+    def _capture_gdbus_gnome(self) -> bool:
+        """GNOME Shell DBus — fallback when gnome-screenshot is absent."""
+        result = self._run([
+            "gdbus", "call", "--session",
             "--dest",        "org.gnome.Shell.Screenshot",
             "--object-path", "/org/gnome/Shell/Screenshot",
             "--method",      "org.gnome.Shell.Screenshot.Screenshot",
             "true",   # include cursor
             "false",  # no flash animation
             SCREENSHOT_PATH,
-        ]
-        try:
-            result = subprocess.run(cmd, capture_output=True, timeout=15)
-        except (subprocess.TimeoutExpired, OSError):
+        ])
+        if result is None:
             return False
-
-        if result.returncode != 0:
-            return False
-
-        # gdbus prints "(true, '/tmp/...')\n" on success
         out = result.stdout.decode(errors="replace").strip()
         if not out.startswith("(true,"):
+            log.error("   gdbus returned unexpected output: %r", out)
             return False
+        return self._wait_for_file()
 
-        # The DBus response can arrive before the compositor finishes writing the
-        # PNG to disk. Poll until the file reaches a sane size or we time out.
-        deadline = time.monotonic() + _FILE_POLL_TIMEOUT
-        while time.monotonic() < deadline:
-            try:
-                if os.path.getsize(SCREENSHOT_PATH) >= _FILE_MIN_BYTES:
-                    return True
-            except OSError:
-                pass
-            time.sleep(_FILE_POLL_INTERVAL)
-
-        return False
-
-    # ------------------------------------------------------------------
-    # Capture method 2: grim
-    # Works on wlroots-based Wayland compositors (Sway, Hyprland, River…).
-    # ------------------------------------------------------------------
-
-    def _capture_via_grim(self) -> bool:
-        grim = shutil.which("grim")
-        if not grim:
+    def _capture_spectacle(self) -> bool:
+        """KDE Spectacle — background mode, no GUI, write to file."""
+        result = self._run(["spectacle", "-b", "-n", "-o", SCREENSHOT_PATH])
+        if result is None:
             return False
-        try:
-            result = subprocess.run([grim, SCREENSHOT_PATH], capture_output=True, timeout=10)
-            return result.returncode == 0
-        except (subprocess.TimeoutExpired, OSError):
-            return False
+        return self._wait_for_file()
 
-    # ------------------------------------------------------------------
-    # Capture method 3: maim
-    # X11 fallback.
-    # ------------------------------------------------------------------
+    def _capture_grim(self) -> bool:
+        """grim — wlroots Wayland (Sway, Hyprland, River …)."""
+        result = self._run(["grim", SCREENSHOT_PATH])
+        if result is None:
+            return False
+        return self._wait_for_file()
 
-    def _capture_via_maim(self) -> bool:
-        maim = shutil.which("maim")
-        if not maim:
+    def _capture_maim(self) -> bool:
+        """maim — X11."""
+        result = self._run(["maim", SCREENSHOT_PATH])
+        if result is None:
             return False
-        try:
-            result = subprocess.run([maim, SCREENSHOT_PATH], capture_output=True, timeout=10)
-            return result.returncode == 0
-        except (subprocess.TimeoutExpired, OSError):
-            return False
+        return self._wait_for_file()
+
+    # ── Canvas ────────────────────────────────────────────────────────────────
 
     def _open_canvas(self) -> None:
         if self._canvas is not None:
             self._canvas.close()
-
         self._canvas = AnnotationCanvas(SCREENSHOT_PATH)
         self._canvas.show()
 
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
+    # ── Notification ──────────────────────────────────────────────────────────
 
     def _notify_error(self, message: str) -> None:
         self.showMessage(
             "WaySnap — ошибка",
             message,
             QSystemTrayIcon.MessageIcon.Critical,
-            5000,
+            6000,
         )
