@@ -10,6 +10,8 @@ Built with Python 3 and PyQt6, designed for both X11 and Wayland.
 - Capture a custom region by dragging a selection rectangle
 - Capture a specific monitor on multi-display setups
 - 8-handle resize + drag-to-move the selection
+- Annotation tools: pencil, arrow, rectangle, ellipse, text
+- Floating toolbar appears next to your selection
 - Saves to `~/Pictures/WaySnap/waysnap_YYYY-MM-DD_HH-MM-SS.png`
 - Copies the result to the clipboard automatically
 
@@ -40,6 +42,8 @@ python main.py
 
 ## Usage
 
+### Selection
+
 | Action | Result |
 |---|---|
 | Left-click tray icon | Take screenshot |
@@ -48,9 +52,30 @@ python main.py
 | Drag corner / edge handle | Resize selection |
 | Drag inside selection | Move selection |
 | `Enter` or `Space` | Save & copy to clipboard |
-| `Esc` (first press) | Reset selection |
-| `Esc` (second press) | Close overlay |
 | Double-click | Save & copy to clipboard |
+
+### Annotation tools
+
+| Key | Tool | Description |
+|---|---|---|
+| `S` | ⬚ Select | Draw / adjust the capture region |
+| `P` | ✏ Pencil | Freehand drawing |
+| `A` | ➤ Arrow | Draw an arrow between two points |
+| `R` | □ Rectangle | Draw a rectangle |
+| `E` | ○ Ellipse | Draw an ellipse |
+| `T` | T Text | Click to place a text label |
+
+Use the toolbar (appears below your selection) to pick a tool, change colour, and adjust line width.
+
+### Other shortcuts
+
+| Key | Result |
+|---|---|
+| `Ctrl+Z` | Undo last annotation |
+| `Esc` (1st) | Cancel active text input |
+| `Esc` (2nd) | Clear all annotations |
+| `Esc` (3rd) | Clear selection |
+| `Esc` (4th) | Close overlay |
 
 ## Project structure
 
@@ -59,7 +84,8 @@ WaySnap/
 ├── main.py                  # Entry point
 └── waysnap/
     ├── tray.py              # TrayIconManager — menu, capture chain, save
-    ├── canvas.py            # AnnotationCanvas — fullscreen selection overlay
+    ├── canvas.py            # AnnotationCanvas — selection overlay + annotation toolbar
+    ├── shapes.py            # Shape model — Stroke, Arrow, Rect, Ellipse, Text
     ├── hotkey.py            # HotkeyManager — global Ctrl+PrintScreen listener
     └── portal_helper.py     # XDG Desktop Portal screenshot helper (subprocess)
 ```
