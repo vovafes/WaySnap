@@ -150,15 +150,17 @@ class TrayIconManager(QSystemTrayIcon):
 
     def _build_capture_chain(self, desktop: str, session: str) -> list:
         if desktop == "gnome":
-            # gnome-screenshot is the most reliable on GNOME Wayland;
-            # gdbus is the fallback if gnome-screenshot is not installed.
+            # GNOME never runs on wlroots, so grim is skipped entirely.
+            # maim works reliably via XWayland (present on all Ubuntu/Fedora installs).
+            # gnome-screenshot (sudo apt install gnome-screenshot) is the cleanest
+            # native option when available.
             return [
                 self._capture_gnome_screenshot,
                 self._capture_gdbus_gnome,
-                self._capture_grim,
                 self._capture_maim,
             ]
         if desktop == "kde":
+            # spectacle is the native KDE tool; grim covers KDE-on-wlroots edge cases.
             return [
                 self._capture_spectacle,
                 self._capture_grim,
@@ -166,7 +168,7 @@ class TrayIconManager(QSystemTrayIcon):
             ]
         # Generic / unknown DE
         if session == "wayland":
-            return [self._capture_grim, self._capture_gdbus_gnome]
+            return [self._capture_grim, self._capture_gdbus_gnome, self._capture_maim]
         return [self._capture_maim, self._capture_grim]
 
     # ── Shared helpers ────────────────────────────────────────────────────────
