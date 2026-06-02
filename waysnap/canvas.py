@@ -4,23 +4,21 @@ import logging
 from PyQt6.QtCore import QPoint, QRect, Qt, pyqtSignal
 from PyQt6.QtGui import (
     QColor, QCursor, QFont, QKeyEvent, QMouseEvent,
-    QPaintEvent, QPainter, QPen,
+    QPaintEvent, QPainter, QPen, QPixmap,
 )
 from PyQt6.QtWidgets import QApplication, QWidget
 
 log = logging.getLogger(__name__)
 
-# ── Visual ────────────────────────────────────────────────────────────────────
-_DIM_ALPHA  = 110               # darkness of the area OUTSIDE the selection
+_DIM_ALPHA  = 110
 _BORDER_CLR = QColor("#00AAFF")
 _BORDER_W   = 2
-_HANDLE_R   = 5                 # visual radius (px)
-_HANDLE_HIT = 9                 # hit-test radius (px) — bigger for easy grab
+_HANDLE_R   = 5
+_HANDLE_HIT = 9
 _HINT       = "Enter — сохранить  •  Esc — сбросить / закрыть"
 
 
 class _H(enum.IntEnum):
-    """Eight resize handles in clockwise order starting from top-left."""
     NONE = -1
     TL=0; T=1; TR=2
     L=3;       R=4
@@ -41,25 +39,25 @@ _CURSORS: dict[_H, Qt.CursorShape] = {
 
 class AnnotationCanvas(QWidget):
     """
-    Transparent fullscreen overlay for region selection.
+    Fullscreen overlay that shows the captured screenshot as a frozen background.
+    The user drags a selection rectangle; on Enter the selected region is emitted.
 
-    The user sees the live desktop through the window.  After the region is
-    confirmed the widget emits region_confirmed(QRect) and closes — the actual
-    screenshot capture happens in TrayIconManager AFTER this window is gone.
+    Flow: TrayIconManager captures the screen FIRST, then opens this canvas.
+    We avoid transparent windows entirely — Qt6/Wayland transparency is unreliable.
 
-    Keyboard
-    --------
-    Enter / Space  — confirm selection
-    Escape         — clear selection; second Escape closes
+    Signals
+    -------
+    region_confirmed(QRect)  — widget-space selection, emitted on confirm
     """
 
-    region_confirmed = pyqtSignal(QRect)  # widget-space coords
+    region_confirmed = pyqtSignal(QRect)
 
-    def __init__(self) -> None:
+    def __init__(self, screenshot_path: str) -> None:
         super().__init__()
+        self._bg = self._load_pixmap(screenshot_path)
 
         self._sel   = QRect()
-        self._state = "idle"           # idle | dragging | selected | resizing | moving
+        self._state = "idle"
 
         self._drag_start    = QPoint()
         self._resize_handle = _H.NONE
@@ -71,14 +69,24 @@ class AnnotationCanvas(QWidget):
 
     # ── Init ──────────────────────────────────────────────────────────────────
 
+    def _load_pixmap(self, path: str) -> QPixmap:
+        px = QPixmap(path)
+        if not px.isNull():
+            log.debug("Background loaded: %d×%d", px.width(), px.height())
+            return px
+        log.error("Cannot load %s — using gray fallback", path)
+        screen = QApplication.primaryScreen()
+        fb = QPixmap(screen.size() if screen else QPixmap(1920, 1080).size())
+        fb.fill(Qt.GlobalColor.darkGray)
+        return fb
+
     def _setup_window(self) -> None:
         self.setWindowTitle("WaySnap")
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
         )
-        # Transparent window: the live desktop shows through
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
         self.setMouseTracking(True)
         self.setCursor(Qt.CursorShape.CrossCursor)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -97,51 +105,45 @@ class AnnotationCanvas(QWidget):
         p = QPainter(self)
         sel = self._sel.normalized()
 
-        if sel.isEmpty():
-            # No selection yet: very subtle dim so the user knows the overlay is active
-            p.fillRect(self.rect(), QColor(0, 0, 0, 25))
-        else:
-            # 1. Start from fully transparent
-            p.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
-            p.fillRect(self.rect(), Qt.GlobalColor.transparent)
+        # 1. Full screenshot fills the entire widget
+        p.drawPixmap(self.rect(), self._bg, self._bg.rect())
 
-            # 2. Dim everything
-            p.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+        if not sel.isEmpty():
+            # 2. Dim everything outside the selection
             p.fillRect(self.rect(), QColor(0, 0, 0, _DIM_ALPHA))
 
-            # 3. Punch a transparent hole where the selection is (full brightness desktop)
-            p.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
-            p.fillRect(sel, Qt.GlobalColor.transparent)
+            # 3. Restore screenshot at full brightness inside selection
+            p.drawPixmap(sel, self._bg, self._widget_to_bg(sel))
 
-            # 4. Border + handles drawn on top
-            p.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+            # 4. Border
             p.setPen(QPen(_BORDER_CLR, _BORDER_W))
             p.setBrush(Qt.BrushStyle.NoBrush)
             p.drawRect(sel.adjusted(0, 0, -1, -1))
 
+            # 5. Handles
             p.setPen(QPen(Qt.GlobalColor.white, 1))
             p.setBrush(Qt.GlobalColor.white)
             for pt in _handle_points(sel):
                 p.drawEllipse(pt, _HANDLE_R, _HANDLE_R)
 
-            # 5. Size label
+            # 6. Size label
             self._paint_size_label(p, sel)
 
-        # 6. Bottom-centre hint (always visible)
+        # 7. Bottom hint
         self._paint_hint(p)
 
     def _paint_size_label(self, p: QPainter, sel: QRect) -> None:
-        text = f"{sel.width()} × {sel.height()}"
+        src  = self._widget_to_bg(sel)
+        text = f"{src.width()} × {src.height()}"
         font = QFont("monospace", 10, QFont.Weight.Bold)
         p.setFont(font)
-        fm = p.fontMetrics()
+        fm   = p.fontMetrics()
         tw, th = fm.horizontalAdvance(text), fm.height()
-        pad = 5
         lx = max(0, sel.left())
-        ly = sel.bottom() + pad + th
-        if ly + pad > self.height():
-            ly = sel.top() - pad
-        p.fillRect(lx - 2, ly - th, tw + pad, th + pad, QColor(0, 0, 0, 180))
+        ly = sel.bottom() + 5 + th
+        if ly + 5 > self.height():
+            ly = sel.top() - 5
+        p.fillRect(lx - 2, ly - th, tw + 7, th + 5, QColor(0, 0, 0, 180))
         p.setPen(Qt.GlobalColor.white)
         p.drawText(lx, ly, text)
 
@@ -150,8 +152,8 @@ class AnnotationCanvas(QWidget):
         p.setFont(font)
         fm = p.fontMetrics()
         tw = fm.horizontalAdvance(_HINT)
-        x = (self.width() - tw) // 2
-        y = self.height() - 12
+        x  = (self.width() - tw) // 2
+        y  = self.height() - 12
         p.fillRect(x - 6, y - fm.height(), tw + 12, fm.height() + 6, QColor(0, 0, 0, 160))
         p.setPen(QColor(200, 200, 200))
         p.drawText(x, y, _HINT)
@@ -162,7 +164,6 @@ class AnnotationCanvas(QWidget):
         if event.button() != Qt.MouseButton.LeftButton:
             return
         pos = event.pos()
-
         if self._state == "selected":
             h = _hit_handle(pos, self._sel.normalized())
             if h != _H.NONE:
@@ -175,7 +176,6 @@ class AnnotationCanvas(QWidget):
                 self._move_origin = QRect(self._sel.normalized())
                 self._state = "moving"
                 return
-
         self._drag_start = pos
         self._sel = QRect(pos, pos)
         self._state = "dragging"
@@ -183,7 +183,6 @@ class AnnotationCanvas(QWidget):
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         pos = event.pos()
-
         if self._state == "dragging":
             self._sel = QRect(self._drag_start, pos)
             self.update()
@@ -191,8 +190,7 @@ class AnnotationCanvas(QWidget):
             self._sel = _apply_resize(self._resize_origin, self._resize_handle, pos)
             self.update()
         elif self._state == "moving":
-            delta = pos - self._move_anchor
-            self._sel = _clamp_to_screen(self._move_origin.translated(delta), self.rect())
+            self._sel = _clamp(self._move_origin.translated(pos - self._move_anchor), self.rect())
             self.update()
         else:
             self._refresh_cursor(pos)
@@ -202,7 +200,7 @@ class AnnotationCanvas(QWidget):
             return
         if self._state in ("dragging", "resizing", "moving"):
             norm = self._sel.normalized()
-            self._sel   = norm if (norm.width() >= 3 and norm.height() >= 3) else QRect()
+            self._sel   = norm if norm.width() >= 3 and norm.height() >= 3 else QRect()
             self._state = "selected" if not self._sel.isEmpty() else "idle"
             self._refresh_cursor(event.pos())
             self.update()
@@ -219,8 +217,7 @@ class AnnotationCanvas(QWidget):
             self._confirm()
         elif k == Qt.Key.Key_Escape:
             if self._state != "idle":
-                self._sel   = QRect()
-                self._state = "idle"
+                self._sel, self._state = QRect(), "idle"
                 self.setCursor(Qt.CursorShape.CrossCursor)
                 self.update()
             else:
@@ -231,13 +228,21 @@ class AnnotationCanvas(QWidget):
     def _confirm(self) -> None:
         sel = self._sel.normalized()
         if sel.width() < 3 or sel.height() < 3:
-            log.warning("Selection too small (%dx%d), ignoring", sel.width(), sel.height())
             return
         log.info("Region confirmed: %s", sel)
         self.region_confirmed.emit(sel)
         self.close()
 
-    # ── Cursor ────────────────────────────────────────────────────────────────
+    # ── Helpers ───────────────────────────────────────────────────────────────
+
+    def _widget_to_bg(self, r: QRect) -> QRect:
+        """Map widget-space rect to background pixmap pixel coords (HiDPI-aware)."""
+        sx = self._bg.width()  / self.width()
+        sy = self._bg.height() / self.height()
+        return QRect(
+            int(r.x() * sx), int(r.y() * sy),
+            max(1, int(r.width() * sx)), max(1, int(r.height() * sy)),
+        )
 
     def _refresh_cursor(self, pos: QPoint) -> None:
         if not self._sel.isEmpty():
@@ -251,19 +256,14 @@ class AnnotationCanvas(QWidget):
         self.setCursor(Qt.CursorShape.CrossCursor)
 
 
-# ── Module-level geometry helpers ─────────────────────────────────────────────
+# ── Geometry helpers ──────────────────────────────────────────────────────────
 
 def _handle_points(r: QRect) -> list[QPoint]:
     cx, cy = r.center().x(), r.center().y()
     return [
-        r.topLeft(),             # TL=0
-        QPoint(cx, r.top()),     # T=1
-        r.topRight(),            # TR=2
-        QPoint(r.left(), cy),    # L=3
-        QPoint(r.right(), cy),   # R=4
-        r.bottomLeft(),          # BL=5
-        QPoint(cx, r.bottom()),  # B=6
-        r.bottomRight(),         # BR=7
+        r.topLeft(), QPoint(cx, r.top()), r.topRight(),
+        QPoint(r.left(), cy),             QPoint(r.right(), cy),
+        r.bottomLeft(), QPoint(cx, r.bottom()), r.bottomRight(),
     ]
 
 
@@ -285,7 +285,7 @@ def _apply_resize(origin: QRect, handle: _H, pos: QPoint) -> QRect:
     return r
 
 
-def _clamp_to_screen(r: QRect, bounds: QRect) -> QRect:
+def _clamp(r: QRect, bounds: QRect) -> QRect:
     x = max(bounds.left(), min(r.x(), bounds.right()  - r.width()  + 1))
     y = max(bounds.top(),  min(r.y(), bounds.bottom() - r.height() + 1))
     return QRect(x, y, r.width(), r.height())
