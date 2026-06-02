@@ -281,7 +281,9 @@ class TrayIconManager(QSystemTrayIcon):
         if not os.path.isfile(_PORTAL_HELPER):
             log.error("portal_helper.py not found: %s", _PORTAL_HELPER)
             return False
-        r = self._run([sys.executable, _PORTAL_HELPER, SCREENSHOT_PATH], timeout=20)
+        # Use the SYSTEM python3, not sys.executable (the venv).
+        # python3-gi is installed system-wide and is not available inside the venv.
+        r = self._run(["python3", _PORTAL_HELPER, SCREENSHOT_PATH], timeout=20)
         return r is not None and self._wait_for_file()
 
     def _capture_gnome_screenshot(self) -> bool:
