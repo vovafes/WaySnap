@@ -4,6 +4,8 @@ import shutil
 import subprocess
 import sys
 import time
+from datetime import datetime
+from pathlib import Path
 
 from PyQt6.QtCore import QCoreApplication, QRect, Qt, QTimer
 from PyQt6.QtGui import QColor, QFont, QIcon, QPainter, QPixmap, QScreen
@@ -14,8 +16,21 @@ from .canvas import AnnotationCanvas
 log = logging.getLogger(__name__)
 
 SCREENSHOT_PATH = "/tmp/waysnap_shot.png"
-REGION_PATH     = "/tmp/waysnap_region.png"
 _PORTAL_HELPER  = os.path.join(os.path.dirname(__file__), "portal_helper.py")
+
+
+def _save_dir() -> Path:
+    """Return ~/Pictures/WaySnap (via xdg-user-dir), creating it if needed."""
+    try:
+        result = subprocess.run(
+            ["xdg-user-dir", "PICTURES"], capture_output=True, text=True, timeout=3
+        )
+        base = Path(result.stdout.strip()) if result.returncode == 0 else Path.home() / "Pictures"
+    except Exception:
+        base = Path.home() / "Pictures"
+    d = base / "WaySnap"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
 
 # ── Timing ────────────────────────────────────────────────────────────────────
 # How long to wait (ms) after hiding the menu before capturing.
@@ -204,15 +219,22 @@ class TrayIconManager(QSystemTrayIcon):
         log.info("Crop: widget %s → px %s", sel, src)
 
         cropped = px.copy(src)
-        cropped.save(REGION_PATH, "PNG")
-        QApplication.clipboard().setPixmap(cropped)
 
-        log.info("Saved %d×%d → %s (clipboard)", src.width(), src.height(), REGION_PATH)
+        # ── Permanent save ────────────────────────────────────────────────────
+        filename  = datetime.now().strftime("waysnap_%Y-%m-%d_%H-%M-%S.png")
+        save_path = _save_dir() / filename
+        cropped.save(str(save_path), "PNG")
+        log.info("Saved %d×%d → %s", src.width(), src.height(), save_path)
+
+        # ── Clipboard ─────────────────────────────────────────────────────────
+        QApplication.clipboard().setPixmap(cropped)
+        log.info("Copied to clipboard")
+
         self.showMessage(
             "WaySnap",
-            f"Скопировано  {src.width()} × {src.height()} px",
+            f"{src.width()} × {src.height()} px\n{save_path}",
             QSystemTrayIcon.MessageIcon.Information,
-            3000,
+            4000,
         )
 
     # ── Environment ───────────────────────────────────────────────────────────
