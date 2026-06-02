@@ -7,7 +7,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from PyQt6.QtCore import QCoreApplication, QRect, Qt, QTimer
+from PyQt6.QtCore import QCoreApplication, Qt, QTimer
 from PyQt6.QtGui import QColor, QFont, QIcon, QPainter, QPixmap, QScreen
 from PyQt6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
@@ -199,31 +199,9 @@ class TrayIconManager(QSystemTrayIcon):
         self._canvas.region_confirmed.connect(self._on_region_confirmed)
         self._canvas.show()
 
-    # ── Step 3: crop and save the selected region ─────────────────────────────
+    # ── Step 3: save the composited region (canvas already cropped + annotated) ──
 
-    def _on_region_confirmed(self, sel: QRect) -> None:
-        px = QPixmap(SCREENSHOT_PATH)
-        if px.isNull():
-            log.error("Cannot load %s for crop", SCREENSHOT_PATH)
-            return
-
-        # sel is in logical screen pixels; scale to physical pixmap pixels
-        screen = QApplication.primaryScreen()
-        if screen:
-            g  = screen.geometry()
-            sx = px.width()  / g.width()
-            sy = px.height() / g.height()
-        else:
-            sx = sy = 1.0
-
-        src = QRect(
-            int(sel.x() * sx), int(sel.y() * sy),
-            max(1, int(sel.width()  * sx)),
-            max(1, int(sel.height() * sy)),
-        )
-        log.info("Crop: widget %s → px %s", sel, src)
-
-        cropped = px.copy(src)
+    def _on_region_confirmed(self, cropped: QPixmap) -> None:
 
         # ── Permanent save ────────────────────────────────────────────────────
         filename  = datetime.now().strftime("waysnap_%Y-%m-%d_%H-%M-%S.png")
