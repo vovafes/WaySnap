@@ -207,7 +207,7 @@ class TrayIconManager(QSystemTrayIcon):
         filename  = datetime.now().strftime("waysnap_%Y-%m-%d_%H-%M-%S.png")
         save_path = _save_dir() / filename
         cropped.save(str(save_path), "PNG")
-        log.info("Saved %d×%d → %s", src.width(), src.height(), save_path)
+        log.info("Saved %d×%d → %s", cropped.width(), cropped.height(), save_path)
 
         # ── Clipboard ─────────────────────────────────────────────────────────
         QApplication.clipboard().setPixmap(cropped)
@@ -215,7 +215,7 @@ class TrayIconManager(QSystemTrayIcon):
 
         self.showMessage(
             "WaySnap",
-            f"Saved  {src.width()} × {src.height()} px\n{save_path}",
+            f"Saved  {cropped.width()} × {cropped.height()} px\n{save_path}",
             QSystemTrayIcon.MessageIcon.Information,
             4000,
         )
