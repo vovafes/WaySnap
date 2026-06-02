@@ -84,22 +84,22 @@ class TrayIconManager(QSystemTrayIcon):
         screens = QApplication.screens()
 
         if len(screens) == 1:
-            menu.addAction("Сделать скриншот").triggered.connect(
+            menu.addAction("Take screenshot").triggered.connect(
                 lambda: self._trigger_screenshot()
             )
         else:
-            menu.addAction("Все экраны").triggered.connect(
+            menu.addAction("All screens").triggered.connect(
                 lambda: self._trigger_screenshot()
             )
             for i, s in enumerate(screens):
                 g     = s.geometry()
-                label = f"Экран {i + 1}  ({g.width()}×{g.height()})"
+                label = f"Screen {i + 1}  ({g.width()}×{g.height()})"
                 menu.addAction(label).triggered.connect(
                     lambda checked=False, scr=s: self._trigger_screenshot(scr)
                 )
 
         menu.addSeparator()
-        menu.addAction("Выход").triggered.connect(self._app.quit)
+        menu.addAction("Quit").triggered.connect(self._app.quit)
 
     def _on_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
         if reason == QSystemTrayIcon.ActivationReason.Trigger:
@@ -155,7 +155,7 @@ class TrayIconManager(QSystemTrayIcon):
 
         log.error("All capture methods failed.")
         self._notify_error(
-            "Не удалось сделать скриншот.\n\n"
+            "Could not capture the screen with any available method.\n\n"
             "GNOME Wayland:\n  sudo apt install gnome-screenshot\n\n"
             "Sway / Hyprland:\n  sudo apt install grim"
         )
@@ -232,7 +232,7 @@ class TrayIconManager(QSystemTrayIcon):
 
         self.showMessage(
             "WaySnap",
-            f"{src.width()} × {src.height()} px\n{save_path}",
+            f"Saved  {src.width()} × {src.height()} px\n{save_path}",
             QSystemTrayIcon.MessageIcon.Information,
             4000,
         )
@@ -363,5 +363,5 @@ class TrayIconManager(QSystemTrayIcon):
     # ── Notification ──────────────────────────────────────────────────────────
 
     def _notify_error(self, message: str) -> None:
-        self.showMessage("WaySnap — ошибка", message,
+        self.showMessage("WaySnap — error", message,
                          QSystemTrayIcon.MessageIcon.Critical, 7000)

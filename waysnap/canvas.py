@@ -15,7 +15,7 @@ _BORDER_CLR = QColor("#00AAFF")
 _BORDER_W   = 2
 _HANDLE_R   = 5
 _HANDLE_HIT = 9
-_HINT       = "Enter — сохранить  •  Esc — сбросить / закрыть"
+_HINT       = "Enter — save  •  Esc — reset / close"
 
 
 class _H(enum.IntEnum):

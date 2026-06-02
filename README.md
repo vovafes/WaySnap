@@ -1,43 +1,59 @@
 # WaySnap
 
-Open-source аналог ShareX для Linux. Скриншоты + продвинутые аннотации.
+A lightweight, open-source screenshot tool for Linux — inspired by ShareX and Flameshot.
+Built with Python 3 and PyQt6, designed for both X11 and Wayland.
 
-## Системные зависимости
+## Features
 
-| Среда      | Утилита | Установка                  |
-|------------|---------|----------------------------|
-| Wayland    | `grim`  | `sudo apt install grim`    |
-| X11        | `maim`  | `sudo apt install maim`    |
+- Runs in the system tray
+- Capture a custom region by dragging a selection rectangle
+- Capture a specific monitor on multi-display setups
+- 8-handle resize + drag-to-move the selection
+- Saves to `~/Pictures/WaySnap/waysnap_YYYY-MM-DD_HH-MM-SS.png`
+- Copies the result to the clipboard automatically
 
-## Установка и запуск
+## System dependencies
+
+| Environment | Tool | Install |
+|---|---|---|
+| GNOME Wayland | `gnome-screenshot` | `sudo apt install gnome-screenshot` |
+| KDE Wayland | `spectacle` | `sudo apt install kde-spectacle` |
+| wlroots (Sway, Hyprland) | `grim` | `sudo apt install grim` |
+| X11 | `maim` | `sudo apt install maim` |
+
+Only one tool is needed depending on your desktop environment.
+
+## Installation
 
 ```bash
-# 1. Клонировать
-git clone https://github.com/vovafes/WaySnap.git && cd WaySnap
-
-# 2. Виртуальное окружение
+git clone https://github.com/vovafes/WaySnap.git
+cd WaySnap
 python3 -m venv .venv && source .venv/bin/activate
-
-# 3. Python-зависимости
 pip install -r requirements.txt
-
-# 4. Запуск
 python main.py
 ```
 
-## Структура проекта
+## Usage
+
+| Action | Result |
+|---|---|
+| Left-click tray icon | Take screenshot |
+| Right-click tray icon | Open menu |
+| Drag on overlay | Draw selection |
+| Drag corner / edge handle | Resize selection |
+| Drag inside selection | Move selection |
+| `Enter` or `Space` | Save & copy to clipboard |
+| `Esc` (first press) | Reset selection |
+| `Esc` (second press) | Close overlay |
+| Double-click | Save & copy to clipboard |
+
+## Project structure
 
 ```
 WaySnap/
-├── main.py              # Точка входа: инициализация QApplication
+├── main.py                  # Entry point
 └── waysnap/
-    ├── tray.py          # TrayIconManager — иконка трея, меню, запуск захвата
-    └── canvas.py        # AnnotationCanvas — полноэкранное окно с фоном-скриншотом
+    ├── tray.py              # TrayIconManager — menu, capture chain, save
+    ├── canvas.py            # AnnotationCanvas — fullscreen selection overlay
+    └── portal_helper.py     # XDG Desktop Portal screenshot helper (subprocess)
 ```
-
-## Использование
-
-- Приложение запускается в системный трей.
-- **ЛКМ** по иконке или пункт меню **«Сделать скриншот»** — захват всего экрана.
-- Открывается полноэкранное окно со «застывшим» экраном.
-- **Escape** — закрыть окно аннотаций.
